@@ -2,13 +2,55 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+import os
+from pathlib import Path
 from typing import Any
+from dotenv import load_dotenv
 import pandas as pd
 import plotly.io as pio
 import polars as pl
 import streamlit as st
 
+import hypolab.config
+import hypolab.models
+import hypolab.profiler.quality
+import hypolab.profiler.engine
+import hypolab.tools.registry
+import hypolab.tools.statistical_tests
+import hypolab.tools.sandbox
+import hypolab.agents.llm_client
+import hypolab.agents.theorist
+import hypolab.agents.experimenter
+import hypolab.agents.critic
+import hypolab.agents.reporter
+import hypolab.agents.orchestrator
+import hypolab.export.html_report
+
+# Ensure hot-reloaded Streamlit sessions always pick up updated schemas and .env across all submodules
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=True)
+if not getattr(hypolab.models, "_HYPOLAB_RELOADED_V4", False):
+    for _mod in (
+        hypolab.config,
+        hypolab.models,
+        hypolab.profiler.quality,
+        hypolab.profiler.engine,
+        hypolab.tools.registry,
+        hypolab.tools.statistical_tests,
+        hypolab.tools.sandbox,
+        hypolab.agents.llm_client,
+        hypolab.agents.theorist,
+        hypolab.agents.experimenter,
+        hypolab.agents.critic,
+        hypolab.agents.reporter,
+        hypolab.agents.orchestrator,
+        hypolab.export.html_report,
+    ):
+        importlib.reload(_mod)
+    setattr(hypolab.models, "_HYPOLAB_RELOADED_V4", True)
+
+from hypolab.agents.llm_client import is_llm_configured
 from hypolab.agents.orchestrator import run_scientific_investigation
 from hypolab.benchmarks import BENCHMARK_DATASETS
 from hypolab.config import HypoLabConfig
@@ -106,9 +148,10 @@ def main() -> None:
         st.divider()
         st.subheader("🧠 Agent & LLM Engine")
         use_llm = st.toggle("Enable LLM Theorist / Reporter (LiteLLM)", value=True)
+        default_env_model = os.getenv("HYPOLAB_MODEL", "gemini/gemini-2.5-flash")
         model_name = st.text_input(
             "LiteLLM Model ID",
-            value="gemini/gemini-2.5-flash",
+            value=default_env_model,
             help="Examples: gemini/gemini-2.5-flash, openai/gpt-4o-mini, anthropic/claude-3-5-sonnet-20241022, ollama/llama3.1",
             disabled=not use_llm,
         )
@@ -117,6 +160,12 @@ def main() -> None:
             type="password",
             disabled=not use_llm,
         )
+        if use_llm:
+            probe_cfg = HypoLabConfig(model=model_name, api_key=api_key_input.strip() or None)
+            if is_llm_configured(probe_cfg):
+                st.caption("✅ **LLM credentials ready** (via UI, `.env`, or Ollama)")
+            else:
+                st.caption("⚠️ **No API key found** — will fall back to heuristic mode unless provided")
 
         st.divider()
         st.subheader("📐 Statistical Rigor Controls")
@@ -209,6 +258,13 @@ def main() -> None:
         inconclusive = [r for r in report.results if r.conclusion == ConclusionStatus.INCONCLUSIVE]
 
         st.divider()
+        llm_used = getattr(report, "llm_used", False)
+        llm_status_note = getattr(report, "llm_status_note", "Investigation complete")
+        if llm_used:
+            st.success(f"🧠 **Engine Mode:** {llm_status_note}")
+        else:
+            st.warning(f"⚙️ **Engine Mode:** {llm_status_note}")
+
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Hypotheses Formulated", len(report.hypotheses))
         k2.metric("Validated Discoveries (FDR)", len(validated))
