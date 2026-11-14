@@ -52,11 +52,13 @@ def run_scientific_investigation(
 
     # Stage 2: Formulate Falsifiable Hypotheses
     _notify("theorist", "Formulating falsifiable hypotheses (H0 vs H1) and identifying potential confounders...")
+    theorist_notes: list[str] = []
     hypotheses = generate_hypotheses(
         profile=profile,
         research_goal=research_goal,
         config=cfg,
         use_llm=use_llm,
+        on_status=lambda msg: (_notify("theorist_status", msg), theorist_notes.append(msg)),
     )
     _notify(
         "theorist_done",
@@ -101,6 +103,7 @@ def run_scientific_investigation(
         results=reviewed_results,
         config=cfg,
         use_llm=use_llm,
+        theorist_status=theorist_notes[-1] if theorist_notes else "",
     )
-    _notify("reporter_done", "Scientific report ready.", report)
+    _notify("reporter_done", f"Scientific report ready ({report.llm_status_note}).", report)
     return report

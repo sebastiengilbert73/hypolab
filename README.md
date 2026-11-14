@@ -49,7 +49,7 @@ Run an autonomous investigation on one of the built-in synthetic benchmark datas
 .\.venv\Scripts\hypolab.exe --demo simpson --no-llm
 
 # Run on a custom CSV file with Gemini / OpenAI / Ollama
-.\.venv\Scripts\hypolab.exe my_data.csv --goal "Analyze key drivers of customer retention" --model gemini/gemini-2.5-flash
+.\.venv\Scripts\hypolab.exe my_data.csv --goal "Analyze key drivers of customer retention" --model gemini/gemini-3.8-flash
 ```
 
 ---

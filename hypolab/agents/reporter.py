@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from hypolab.agents.llm_client import call_llm_json, is_llm_configured
 from hypolab.config import HypoLabConfig
 from hypolab.models import (
@@ -17,10 +18,16 @@ You are the Lead Principal Investigator (Reporter Agent) in HypoLab.
 Synthesize the results of an autonomous scientific investigation into a clear, rigorous executive report.
 
 Return ONLY a JSON object with keys:
-- "executive_summary": 2-3 paragraphs summarizing key validated discoveries, their effect sizes, and important refuted hypotheses (including any confounding or Simpson's paradox findings).
-- "methodology_notes": 1 paragraph describing the profiling, parametric/non-parametric test selection, Benjamini-Hochberg FDR correction, and confounding control.
-- "limitations_and_next_steps": List of 3-4 actionable follow-up recommendations or limitations.
+- "executive_summary": A single markdown string (2-3 paragraphs) summarizing key validated discoveries, their effect sizes, and important refuted hypotheses (including any confounding or Simpson's paradox findings).
+- "methodology_notes": A single markdown string (1 paragraph) describing the profiling, parametric/non-parametric test selection, Benjamini-Hochberg FDR correction, and confounding control.
+- "limitations_and_next_steps": List of 3-4 actionable follow-up recommendations or limitations (strings).
 """
+
+
+def _coerce_text(val: Any) -> str:
+    if isinstance(val, list):
+        return "\n\n".join(str(x) for x in val)
+    return str(val)
 
 
 def build_scientific_report(
@@ -30,15 +37,29 @@ def build_scientific_report(
     results: list[ExperimentResult],
     config: HypoLabConfig | None = None,
     use_llm: bool = True,
+    theorist_status: str = "",
 ) -> ScientificReport:
     """Create the final ScientificReport combining all hypotheses, results, and narrative synthesis."""
     cfg = config or HypoLabConfig()
+    # Ensure cross-reload Pydantic model instances validate cleanly
+    if not isinstance(profile, DatasetProfile):
+        profile = DatasetProfile.model_validate(profile.model_dump())
+    hypotheses = [
+        h if isinstance(h, Hypothesis) else Hypothesis.model_validate(h.model_dump())
+        for h in hypotheses
+    ]
+    results = [
+        r if isinstance(r, ExperimentResult) else ExperimentResult.model_validate(r.model_dump())
+        for r in results
+    ]
     hyp_map = {h.id: h for h in hypotheses}
 
-    validated = [r for r in results if r.conclusion == ConclusionStatus.VALIDATED]
-    refuted = [r for r in results if r.conclusion == ConclusionStatus.REFUTED]
-    inconclusive = [r for r in results if r.conclusion == ConclusionStatus.INCONCLUSIVE]
+    validated = [r for r in results if r.conclusion.value == ConclusionStatus.VALIDATED.value]
+    refuted = [r for r in results if r.conclusion.value == ConclusionStatus.REFUTED.value]
+    inconclusive = [r for r in results if r.conclusion.value == ConclusionStatus.INCONCLUSIVE.value]
 
+    llm_err_note = ""
+    llm_raw: dict[str, Any] | None = None
     if use_llm and is_llm_configured(cfg):
         try:
             findings_lines = []
@@ -58,20 +79,29 @@ def build_scientific_report(
             )
             raw = call_llm_json(REPORTER_SYSTEM_PROMPT, user_prompt, cfg)
             if isinstance(raw, dict) and "executive_summary" in raw:
-                return ScientificReport(
-                    dataset_profile=profile,
-                    research_goal=research_goal,
-                    alpha=cfg.alpha,
-                    hypotheses=hypotheses,
-                    results=results,
-                    executive_summary=str(raw["executive_summary"]),
-                    methodology_notes=str(raw.get("methodology_notes", _default_methodology(cfg))),
-                    limitations_and_next_steps=[
-                        str(x) for x in raw.get("limitations_and_next_steps", _default_limitations(profile))
-                    ],
-                )
-        except Exception:
-            pass
+                llm_raw = raw
+        except Exception as exc:
+            llm_err_note = f"Fallback to heuristic synthesis (LLM error: {exc})"
+    elif use_llm and not is_llm_configured(cfg):
+        llm_err_note = f"Fallback to heuristic mode (No API key found in UI or .env for {cfg.model})"
+    else:
+        llm_err_note = "Deterministic heuristic mode (LLM disabled by user)"
+
+    if llm_raw is not None:
+        return ScientificReport(
+            dataset_profile=profile,
+            research_goal=research_goal,
+            alpha=cfg.alpha,
+            hypotheses=hypotheses,
+            results=results,
+            executive_summary=_coerce_text(llm_raw["executive_summary"]),
+            methodology_notes=_coerce_text(llm_raw.get("methodology_notes", _default_methodology(cfg))),
+            limitations_and_next_steps=[
+                str(x) for x in llm_raw.get("limitations_and_next_steps", _default_limitations(profile))
+            ],
+            llm_used=True,
+            llm_status_note=f"LLM Active ({cfg.model})",
+        )
 
     # Deterministic structured synthesis
     exec_lines = [
@@ -112,6 +142,8 @@ def build_scientific_report(
         executive_summary="\n\n".join(exec_lines),
         methodology_notes=_default_methodology(cfg),
         limitations_and_next_steps=_default_limitations(profile),
+        llm_used=False,
+        llm_status_note=llm_err_note or theorist_status or "Deterministic heuristic mode",
     )
 
 

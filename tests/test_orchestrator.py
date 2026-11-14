@@ -75,3 +75,20 @@ def test_orchestrator_detects_nonlinear_quadratic_effect() -> None:
         use_llm=False,
     )
     assert len(report.results) >= 3
+
+
+def test_extract_json_from_text_repairs_latex_backslashes() -> None:
+    from hypolab.agents.llm_client import extract_json_from_text
+
+    raw_llm_output = (
+        '```json\n'
+        '{\n'
+        '  "executive_summary": "Significant at \\alpha = 0.05 ($p \\le 10^{-5}$, \\chi^2 = 14.2, \\\\rho = 0.6).",\n'
+        '  "methodology_notes": "Tested \\beta_1 \\neq 0.",\n'
+        '}\n'
+        '```'
+    )
+    parsed = extract_json_from_text(raw_llm_output)
+    assert isinstance(parsed, dict)
+    assert "\\alpha" in parsed["executive_summary"]
+    assert "\\rho" in parsed["executive_summary"]

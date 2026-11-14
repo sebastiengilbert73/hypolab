@@ -181,3 +181,5 @@ class ScientificReport(BaseModel):
     executive_summary: str
     methodology_notes: str
     limitations_and_next_steps: list[str] = Field(default_factory=list)
+    llm_used: bool = False
+    llm_status_note: str = "Deterministic heuristic mode"

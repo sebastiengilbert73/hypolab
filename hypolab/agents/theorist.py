@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Callable
 from hypolab.agents.llm_client import call_llm_json, is_llm_configured
 from hypolab.config import HypoLabConfig
 from hypolab.models import (
@@ -15,22 +16,29 @@ You are an elite quantitative research scientist (Theorist Agent) in HypoLab.
 Given a statistical profile of a dataset and a research goal, formulate falsifiable, high-value scientific hypotheses.
 
 Rules:
-1. Every hypothesis MUST specify:
-   - id: "HYP-001", "HYP-002", etc.
-   - title: Short descriptive title
-   - statement: Clear alternative hypothesis (H1) predicting a specific relationship or difference
-   - null_hypothesis: Formal null hypothesis (H0) of no effect / independence
-   - rationale: Statistical reasoning grounded in the dataset profile
-   - variables: List of primary column names involved (must match exact dataset column names)
-   - confounders: List of 0-2 potential confounding columns in the dataset
-   - proposed_method: One of:
-     * "compare_two_groups" (tool_params: {"group_col": "<cat_col>", "target_col": "<num_col>"})
-     * "compare_multiple_groups" (tool_params: {"group_col": "<cat_col>", "target_col": "<num_col>"})
-     * "test_categorical_association" (tool_params: {"col_a": "<cat_col_1>", "col_b": "<cat_col_2>"})
-     * "test_correlation" (tool_params: {"col_x": "<num_col_1>", "col_y": "<num_col_2>", "control_col": "<optional_confounder>"})
-     * "multivariate_regression" (tool_params: {"target": "<target_col>", "features": ["<col1>", "<col2>"]})
-     * "python_sandbox" (tool_params: {"code": "<valid python code assigning dict to result and plotly figure to fig>"})
-   - priority: 1 (highest) to 5 (lowest)
+1. Every hypothesis object MUST specify:
+   - "id": "HYP-001", "HYP-002", etc.
+   - "title": Short descriptive title
+   - "statement": Clear alternative hypothesis (H1) predicting a specific relationship or difference
+   - "null_hypothesis": Formal null hypothesis (H0) of no effect / independence
+   - "rationale": Statistical reasoning grounded in the dataset profile
+   - "variables": List of primary column names involved (MUST match exact dataset column names)
+   - "confounders": List of 0-2 potential confounding column names in the dataset (use [] if none)
+   - "proposed_method": One of:
+     * "compare_two_groups"
+     * "compare_multiple_groups"
+     * "test_categorical_association"
+     * "test_correlation"
+     * "multivariate_regression"
+     * "python_sandbox"
+   - "tool_params": Dictionary of arguments for the chosen method:
+     * For "compare_two_groups": {"group_col": "<cat_col>", "target_col": "<num_col>"}
+     * For "compare_multiple_groups": {"group_col": "<cat_col>", "target_col": "<num_col>"}
+     * For "test_categorical_association": {"col_a": "<cat_col_1>", "col_b": "<cat_col_2>"}
+     * For "test_correlation": {"col_x": "<num_col_1>", "col_y": "<num_col_2>", "control_col": "<optional_confounder>"}
+     * For "multivariate_regression": {"target": "<target_col>", "features": ["<col1>", "<col2>"]}
+     * For "python_sandbox": {"code": "<valid python code assigning dict to result and plotly figure to fig>"}
+   - "priority": Integer from 1 (highest) to 5 (lowest)
 
 2. Return ONLY a JSON object with a single key "hypotheses" containing the list of hypothesis objects.
 """
@@ -41,35 +49,55 @@ def generate_hypotheses(
     research_goal: str = "Discover statistically significant relationships, group differences, and potential confounding effects.",
     config: HypoLabConfig | None = None,
     use_llm: bool = True,
+    on_status: Callable[[str], None] | None = None,
 ) -> list[Hypothesis]:
     """Generate falsifiable statistical hypotheses using LLM or autonomous heuristic engine."""
     cfg = config or HypoLabConfig()
 
-    if use_llm and is_llm_configured(cfg):
-        try:
-            user_prompt = (
-                f"Research Goal: {research_goal}\n"
-                f"Maximum Hypotheses to Generate: {cfg.max_hypotheses}\n\n"
-                f"Dataset Profile:\n{profile.to_llm_summary()}\n\n"
-                "Generate diverse, rigorous hypotheses covering correlations, group comparisons, "
-                "categorical associations, and multivariate confounding checks."
-            )
-            raw = call_llm_json(THEORIST_SYSTEM_PROMPT, user_prompt, cfg)
-            items = raw.get("hypotheses", raw) if isinstance(raw, dict) else raw
-            valid_cols = {c.name for c in profile.columns}
-            parsed: list[Hypothesis] = []
-            for idx, item in enumerate(items[: cfg.max_hypotheses], start=1):
-                if not isinstance(item, dict):
-                    continue
-                item.setdefault("id", f"HYP-{idx:03d}")
-                hyp = Hypothesis.model_validate(item)
-                if all(v in valid_cols for v in hyp.variables):
-                    parsed.append(hyp)
-            if parsed:
-                return parsed
-        except Exception:
-            # Fall back cleanly to deterministic heuristic hypothesis generator
-            pass
+    if use_llm:
+        if is_llm_configured(cfg):
+            try:
+                user_prompt = (
+                    f"Research Goal: {research_goal}\n"
+                    f"Maximum Hypotheses to Generate: {cfg.max_hypotheses}\n\n"
+                    f"Dataset Profile:\n{profile.to_llm_summary()}\n\n"
+                    "Generate diverse, rigorous hypotheses covering correlations, group comparisons, "
+                    "categorical associations, and multivariate confounding checks."
+                )
+                raw = call_llm_json(THEORIST_SYSTEM_PROMPT, user_prompt, cfg)
+                items = raw.get("hypotheses", raw) if isinstance(raw, dict) else raw
+                valid_cols = {c.name for c in profile.columns}
+                parsed: list[Hypothesis] = []
+                if isinstance(items, list):
+                    for idx, item in enumerate(items[: cfg.max_hypotheses], start=1):
+                        if not isinstance(item, dict):
+                            continue
+                        item["id"] = f"HYP-{idx:03d}"
+                        if item.get("confounders") is None:
+                            item["confounders"] = []
+                        else:
+                            item["confounders"] = [c for c in item["confounders"] if c in valid_cols]
+                        if item.get("tool_params") is None or not isinstance(item.get("tool_params"), dict):
+                            item["tool_params"] = {}
+                        prio = item.get("priority", 1)
+                        try:
+                            item["priority"] = max(1, min(5, int(prio)))
+                        except Exception:
+                            item["priority"] = 2
+
+                        hyp = Hypothesis.model_validate(item)
+                        if hyp.variables and all(v in valid_cols for v in hyp.variables):
+                            parsed.append(hyp)
+                if parsed:
+                    if on_status:
+                        on_status(f"LLM Theorist ({cfg.model}) generated {len(parsed)} hypotheses.")
+                    return parsed
+            except Exception as exc:
+                if on_status:
+                    on_status(f"LLM Theorist call failed ({exc}); falling back to heuristic engine.")
+        else:
+            if on_status:
+                on_status("No API key detected for LLM; using deterministic heuristic Theorist.")
 
     return generate_heuristic_hypotheses(profile, research_goal, max_hypotheses=cfg.max_hypotheses)
 
